@@ -959,8 +959,10 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       model_mode: str,
       quant: None | Quant,
       rngs: nnx.Rngs,
+      layer_index: int = 0,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
+    self.layer_index = layer_index
     self.mlp = MlpBlock(
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
@@ -975,6 +977,21 @@ class Qwen3DecoderLayer(AttentionWithNorm):
         rngs=rngs,
     )
 
+  def _should_capture(self, activation_type: str) -> bool:
+    """Check if an activation should be captured based on config."""
+    if not self.config.capture_activations:
+      return False
+    
+    # Check if this layer is in the capture list (empty list means all layers)
+    if self.config.activation_capture_layers and self.layer_index not in self.config.activation_capture_layers:
+      return False
+    
+    # Check if this activation type should be captured (empty list means all types)
+    if self.config.activation_capture_types and activation_type not in self.config.activation_capture_types:
+      return False
+    
+    return True
+
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -986,15 +1003,42 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ):
+    # For scanned layers, use simple keys since scan handles stacking
+    # For non-scanned layers, use layer-specific keys
+    key_suffix = "" if self.config.scan_layers else f"_layer_{self.layer_index}"
+    
+    # Capture layer input
+    if self._should_capture('input'):
+      self.sow('activations', f'input{key_suffix}', inputs)
+    
     hidden_states, intermediate_inputs = self.apply_attention_with_norm(
         inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
+    
+    # Capture post-attention (before residual addition)
+    if self._should_capture('post_attn'):
+      # attention_lnx is the output from attention before residual
+      # We need to capture it from apply_attention_with_norm
+      attention_output = intermediate_inputs - inputs  # Reverse the residual to get attention output
+      self.sow('activations', f'post_attn{key_suffix}', attention_output)
+    
+    # Capture pre-MLP (input to MLP block, after post-attention norm)
+    if self._should_capture('pre_mlp'):
+      self.sow('activations', f'pre_mlp{key_suffix}', hidden_states)
 
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    
+    # Capture post-MLP (output from MLP block, before residual addition)
+    if self._should_capture('post_mlp'):
+      self.sow('activations', f'post_mlp{key_suffix}', mlp_lnx)
 
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    
+    # Capture layer output
+    if self._should_capture('output'):
+      self.sow('activations', f'output{key_suffix}', layer_output)
 
     if self.config.scan_layers:
       return layer_output, None
@@ -1015,8 +1059,10 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       model_mode: str,
       quant: None | Quant,
       rngs: nnx.Rngs,
+      layer_index: int = 0,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
+    self.layer_index = layer_index
     self.moe_block = RoutedMoE(
         config=config,
         num_experts=config.num_experts,
@@ -1031,6 +1077,21 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         rngs=rngs,
     )
 
+  def _should_capture(self, activation_type: str) -> bool:
+    """Check if an activation should be captured based on config."""
+    if not self.config.capture_activations:
+      return False
+    
+    # Check if this layer is in the capture list (empty list means all layers)
+    if self.config.activation_capture_layers and self.layer_index not in self.config.activation_capture_layers:
+      return False
+    
+    # Check if this activation type should be captured (empty list means all types)
+    if self.config.activation_capture_types and activation_type not in self.config.activation_capture_types:
+      return False
+    
+    return True
+
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -1042,17 +1103,42 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ):
+    # For scanned layers, use simple keys since scan handles stacking
+    # For non-scanned layers, use layer-specific keys
+    key_suffix = "" if self.config.scan_layers else f"_layer_{self.layer_index}"
+    
+    # Capture layer input
+    if self._should_capture('input'):
+      self.sow('activations', f'input{key_suffix}', inputs)
+    
     hidden_states, intermediate_inputs = self.apply_attention_with_norm(
         inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
+    
+    # Capture post-attention (before residual addition)
+    if self._should_capture('post_attn'):
+      attention_output = intermediate_inputs - inputs
+      self.sow('activations', f'post_attn{key_suffix}', attention_output)
+    
+    # Capture pre-MLP (input to MLP/MoE block, after post-attention norm)
+    if self._should_capture('pre_mlp'):
+      self.sow('activations', f'pre_mlp{key_suffix}', hidden_states)
 
     mlp_lnx, load_balance_loss = self.moe_block(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
     if load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+    
+    # Capture post-MLP (output from MoE block, before residual addition)
+    if self._should_capture('post_mlp'):
+      self.sow('activations', f'post_mlp{key_suffix}', mlp_lnx)
 
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    
+    # Capture layer output
+    if self._should_capture('output'):
+      self.sow('activations', f'output{key_suffix}', layer_output)
 
     if self.config.scan_layers:
       return layer_output, None
