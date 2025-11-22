@@ -925,3 +925,14 @@ partial_rotary_factor: 1.0
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
 use_tokamax_splash: false
+
+################################## Activation Extraction for SAE Training ##################################
+# Enable activation capture for Sparse Autoencoder (SAE) training and mechanistic interpretability
+capture_activations: false
+# List of layer indices to capture activations from (empty list = all layers)
+# Example: [0, 6, 12, 18, 24] to capture from specific layers
+activation_capture_layers: []
+# List of activation types to capture
+# Options: 'input', 'post_attn', 'pre_mlp', 'post_mlp', 'output'
+# Example: ['post_mlp', 'post_attn', 'output']
+activation_capture_types: []

@@ -488,6 +488,7 @@ class Decoder(nn.Module):
             "params": params_spec,
             "cache": cache_spec,
             "intermediates": 0,
+            "activations": 0,  # Stack activations along axis 0 for each scanned layer
             "aqt": 0,
             "_overwrite_with_gradient": 0,
         },
@@ -865,6 +866,8 @@ class Decoder(nn.Module):
               }
             if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
               layer_kwargs = {"layer_idx": lyr}
+            if cfg.decoder_block == DecoderBlockType.QWEN3 or cfg.decoder_block == DecoderBlockType.QWEN3_MOE:
+              layer_kwargs = {"layer_index": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
